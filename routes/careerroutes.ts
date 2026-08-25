@@ -1,45 +1,25 @@
 import express, { Request, Response } from "express";
 import multer from "multer";
 import path from "path";
-import fs from "fs";
+import { v2 as cloudinary } from "cloudinary";
 
 import Career from "../models/Career.js";
 
 const router = express.Router();
-const uploadDir = path.join(process.cwd(), "uploads", "resumes");
 
-if (!fs.existsSync(uploadDir)) {
-  fs.mkdirSync(uploadDir, {
-    recursive: true,
-  });
-}
+/*CLOUDINARY CONFIG*/
 
-
-const storage = multer.diskStorage({
-  destination: (
-    req: Request,
-    file: Express.Multer.File,
-    cb
-  ) => {
-    cb(null, uploadDir);
-  },
-
-  filename: (
-    req: Request,
-    file: Express.Multer.File,
-    cb
-  ) => {
-    const extension = path.extname(file.originalname);
-
-    const filename =
-      `resume-${Date.now()}-${Math.round(
-        Math.random() * 1e9
-      )}${extension}`;
-
-    cb(null, filename);
-  },
+cloudinary.config({
+  cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
+  api_key: process.env.CLOUDINARY_API_KEY,
+  api_secret: process.env.CLOUDINARY_API_SECRET,
 });
 
+const storage = multer.memoryStorage();
+
+/* =====================================================
+   FILE FILTER
+===================================================== */
 
 const fileFilter: multer.Options["fileFilter"] = (
   req,
@@ -76,7 +56,9 @@ const fileFilter: multer.Options["fileFilter"] = (
   }
 };
 
-
+/* =====================================================
+   MULTER CONFIG
+===================================================== */
 
 const upload = multer({
   storage,
@@ -88,13 +70,75 @@ const upload = multer({
   fileFilter,
 });
 
+/* =====================================================
+   HELPER
+   Upload resume to Cloudinary
+===================================================== */
+
+const uploadResumeToCloudinary = (
+  file: Express.Multer.File
+): Promise<{
+  secure_url: string;
+  public_id: string;
+}> => {
+  return new Promise(
+    (resolve, reject) => {
+      const uploadStream =
+        cloudinary.uploader.upload_stream(
+          {
+            folder: "codenexa/resumes",
+
+            resource_type: "raw",
+
+            use_filename: true,
+
+            unique_filename: true,
+
+            filename_override:
+              file.originalname,
+          },
+
+          (error, result) => {
+            if (error || !result) {
+              return reject(
+                error ||
+                  new Error(
+                    "Cloudinary upload failed."
+                  )
+              );
+            }
+
+            resolve({
+              secure_url:
+                result.secure_url,
+
+              public_id:
+                result.public_id,
+            });
+          }
+        );
+
+      uploadStream.end(file.buffer);
+    }
+  );
+};
+
+/* =====================================================
+   GET ALL CAREER APPLICATIONS
+===================================================== */
 
 router.get(
   "/",
-  async (req: Request, res: Response) => {
+  async (
+    req: Request,
+    res: Response
+  ) => {
     try {
-      const applications = await Career.find()
-        .sort({ createdAt: -1 });
+      const applications =
+        await Career.find()
+          .sort({
+            createdAt: -1,
+          });
 
       return res.status(200).json({
         success: true,
@@ -115,10 +159,22 @@ router.get(
   }
 );
 
+/* =====================================================
+   APPLY FOR CAREER
+===================================================== */
+
 router.post(
   "/apply",
   upload.single("resume"),
-  async (req: Request, res: Response) => {
+
+  async (
+    req: Request,
+    res: Response
+  ) => {
+    let uploadedPublicId:
+      | string
+      | null = null;
+
     try {
       const {
         name,
@@ -131,6 +187,7 @@ router.post(
         message,
       } = req.body;
 
+      /* REQUIRED FIELDS */
 
       if (
         !name ||
@@ -139,10 +196,6 @@ router.post(
         !position ||
         !experience
       ) {
-        if (req.file) {
-          fs.unlinkSync(req.file.path);
-        }
-
         return res.status(400).json({
           success: false,
           message:
@@ -150,9 +203,7 @@ router.post(
         });
       }
 
-      // ===============================================
-      // RESUME REQUIRED
-      // ===============================================
+      /* RESUME REQUIRED */
 
       if (!req.file) {
         return res.status(400).json({
@@ -161,49 +212,96 @@ router.post(
         });
       }
 
+      /* CLOUDINARY UPLOAD */
 
-      const career = await Career.create({
-        name: name.trim(),
-        email: email.trim().toLowerCase(),
-        phone: phone.trim(),
-        position: position.trim(),
-        experience: experience.trim(),
+      console.log(
+        "Uploading resume to Cloudinary..."
+      );
 
-        linkedin: linkedin
-          ? linkedin.trim()
-          : "",
+      const uploaded =
+        await uploadResumeToCloudinary(
+          req.file
+        );
 
-        portfolio: portfolio
-          ? portfolio.trim()
-          : "",
+      uploadedPublicId =
+        uploaded.public_id;
 
-        message: message
-          ? message.trim()
-          : "",
+      console.log(
+        "Resume uploaded successfully."
+      );
 
-        resume: {
-          filename: req.file.filename,
-          originalName: req.file.originalname,
-          path: req.file.path,
-          mimetype: req.file.mimetype,
-          size: req.file.size,
-        },
+      /* SAVE APPLICATION */
 
-        status: "New",
-      });
+      const career =
+        await Career.create({
+          name: name.trim(),
 
+          email:
+            email
+              .trim()
+              .toLowerCase(),
 
+          phone: phone.trim(),
+
+          position:
+            position.trim(),
+
+          experience:
+            experience.trim(),
+
+          linkedin: linkedin
+            ? linkedin.trim()
+            : "",
+
+          portfolio: portfolio
+            ? portfolio.trim()
+            : "",
+
+          message: message
+            ? message.trim()
+            : "",
+
+          resume: {
+            filename:
+              req.file.originalname,
+
+            originalName:
+              req.file.originalname,
+
+            path:
+              uploaded.secure_url,
+
+            mimetype:
+              req.file.mimetype,
+
+            size:
+              req.file.size,
+
+            publicId:
+              uploaded.public_id,
+          },
+
+          status: "New",
+        });
 
       return res.status(201).json({
         success: true,
+
         message:
           "Career application submitted successfully.",
+
         application: {
           id: career._id,
+
           name: career.name,
+
           email: career.email,
-          position: career.position,
-          status: career.status,
+
+          position:
+            career.position,
+
+          status:
+            career.status,
         },
       });
     } catch (error) {
@@ -212,17 +310,27 @@ router.post(
         error
       );
 
+      /* =================================================
+         IF MONGODB SAVE FAILS AFTER CLOUDINARY UPLOAD,
+         DELETE THE CLOUDINARY FILE
+      ================================================= */
 
-
-      if (req.file) {
+      if (uploadedPublicId) {
         try {
-          if (fs.existsSync(req.file.path)) {
-            fs.unlinkSync(req.file.path);
-          }
-        } catch (fileError) {
+          await cloudinary.uploader.destroy(
+            uploadedPublicId,
+            {
+              resource_type: "raw",
+            }
+          );
+
+          console.log(
+            "Cloudinary resume deleted after failed application."
+          );
+        } catch (deleteError) {
           console.error(
-            "Resume Delete Error:",
-            fileError
+            "Cloudinary Cleanup Error:",
+            deleteError
           );
         }
       }
@@ -236,6 +344,9 @@ router.post(
   }
 );
 
+/* =====================================================
+   MULTER ERROR HANDLER
+===================================================== */
 
 router.use(
   (
@@ -244,8 +355,14 @@ router.use(
     res: Response,
     next: express.NextFunction
   ) => {
-    if (error instanceof multer.MulterError) {
-      if (error.code === "LIMIT_FILE_SIZE") {
+    if (
+      error instanceof
+      multer.MulterError
+    ) {
+      if (
+        error.code ===
+        "LIMIT_FILE_SIZE"
+      ) {
         return res.status(400).json({
           success: false,
           message:
@@ -262,7 +379,8 @@ router.use(
     if (error) {
       return res.status(400).json({
         success: false,
-        message: error.message,
+        message:
+          error.message,
       });
     }
 
@@ -270,41 +388,61 @@ router.use(
   }
 );
 
-// =====================================================
-// DELETE CAREER APPLICATION
-// =====================================================
+/*DELETE CAREER APPLICATION*/
 
 router.delete(
   "/:id",
-  async (req: Request, res: Response) => {
+  async (
+    req: Request,
+    res: Response
+  ) => {
     try {
-      const { id } = req.params;
+      const { id } =
+        req.params;
 
-      const career = await Career.findById(id);
+      const career =
+        await Career.findById(id);
 
       if (!career) {
         return res.status(404).json({
           success: false,
-          message: "Career application not found.",
+          message:
+            "Career application not found.",
         });
       }
 
-      // Delete uploaded resume from server
-      if (career.resume?.path) {
+      /* =================================================
+         DELETE RESUME FROM CLOUDINARY
+      ================================================= */
+
+      const publicId =
+        career.resume?.publicId;
+
+      if (publicId) {
         try {
-          if (fs.existsSync(career.resume.path)) {
-            fs.unlinkSync(career.resume.path);
-          }
-        } catch (fileError) {
+          await cloudinary.uploader.destroy(
+            publicId,
+            {
+              resource_type: "raw",
+            }
+          );
+
+          console.log(
+            "Resume deleted from Cloudinary."
+          );
+        } catch (cloudinaryError) {
           console.error(
-            "Resume Delete Error:",
-            fileError
+            "Cloudinary Resume Delete Error:",
+            cloudinaryError
           );
         }
       }
 
-      // Delete application from MongoDB
-      await Career.findByIdAndDelete(id);
+      /* DELETE APPLICATION */
+
+      await Career.findByIdAndDelete(
+        id
+      );
 
       return res.status(200).json({
         success: true,
